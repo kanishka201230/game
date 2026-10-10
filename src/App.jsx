@@ -1,10 +1,17 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
+import Game from "./Game";
 
 function App() {
   const [videoEnded, setVideoEnded] = useState(false);
   const [showCharacterSelect, setShowCharacterSelect] = useState(false);
-  const [selectedCharacter, setSelectedCharacter] = useState(null);
+  const [isGame, setIsGame] = useState(false);
+
+  useEffect(() => {
+    if (window.location.search.includes("game=true")) {
+      setIsGame(true);
+    }
+  }, []);
 
   const startExperience = () => {
     setShowCharacterSelect(true);
@@ -14,6 +21,10 @@ function App() {
     // Navigate straight to the multiplayer page
     window.location.href = `/multiplayer.html?character=${characterName}`;
   };
+
+  if (isGame) {
+    return <Game />;
+  }
 
   if (showCharacterSelect) {
     return (
