@@ -1,5 +1,12 @@
 // Path and Maze Network Configuration for 3D Forest Escape Game
 
+// Far-end initial spawn coordinates near final doors (Door A: Moon Gate and Door B: Sun Gate)
+export const ATTACKER_INITIAL_SPAWN = [-30, 1.8, -130];
+
+// Configurable Hand Gesture Movement Speed (~40-50% of normal keyboard speed for slow, smooth control)
+// Default: 4.0 units/sec (Normal keyboard walk speed is 9.0)
+export const GESTURE_MOVE_SPEED = 4.0;
+
 export const PATH_SEGMENTS = [
   // 1. Start Entrance Segment (Spawn at [0, 12])
   { id: 's_start', p1: [0, 16], p2: [0, -10], radius: 3.5 },
@@ -26,7 +33,9 @@ export const PATH_SEGMENTS = [
   { id: 's_j1_main_east', p1: [-20, -40], p2: [-10, -40], radius: 3.5 },
   // Requires Door 3 (Ancient Gate 1 at -10, -40)
   { id: 's_j1_main_down2', p1: [-10, -40], p2: [0, -40], radius: 3.5, requiredDoor: 'door3' },
-  { id: 's_j1_main_to_j2', p1: [0, -40], p2: [0, -70], radius: 3.5, requiredDoor: 'door3' },
+  { id: 's_j1_main_to_reconnect', p1: [0, -40], p2: [0, -60], radius: 3.5, requiredDoor: 'door3' },
+  // Reconnection trunk from z = -60 to J2 (accessible from Door 1 or Door 3)
+  { id: 's_reconnect_to_j2', p1: [0, -60], p2: [0, -70], radius: 3.5 },
 
   // 3. Segment J2 -> J3 (Final Junction at z = -95)
   { id: 's_j2_to_j3', p1: [0, -70], p2: [0, -95], radius: 3.5 },
@@ -46,51 +55,114 @@ export const PATH_SEGMENTS = [
   { id: 's_j3_right_down2', p1: [30, -140], p2: [30, -165], radius: 4.2, requiredDoor: 'doorB' }, // Trap Pit
 ];
 
+// Hidden Collectible Clues scattered on walkable forest paths
+export const CLUES_CONFIG = [
+  {
+    id: 'clue1',
+    name: 'Rune of Whispers',
+    route: 'Left Route (Route 1)',
+    digit: '4',
+    order: 1,
+    position: [-33, 0.4, -10],
+    description: 'An ancient turquoise runestone revealing the 1st passcode digit: 4'
+  },
+  {
+    id: 'clue2',
+    name: 'Shadow Tablet',
+    route: 'Right Route (Route 2)',
+    digit: '7',
+    order: 2,
+    position: [23, 0.4, -22],
+    description: 'A glowing etched stone tablet revealing the 2nd passcode digit: 7'
+  },
+  {
+    id: 'clue3',
+    name: 'Ancient Moon Scroll',
+    route: 'Center Route (Route 3)',
+    digit: '2',
+    order: 3,
+    position: [-15, 0.4, -38],
+    description: 'An enchanted floating parchment revealing the 3rd passcode digit: 2'
+  }
+];
+
 export const DOORS_CONFIG = [
   {
     id: 'door1',
-    name: 'Ancient Riddle Gate',
+    name: 'Left Riddle Gate',
+    branch: 'Left Branch (Route 1)',
     position: [-35, 0, -30],
     rotation: [0, 0, 0],
     type: 'riddle',
-    question: 'Riddle of the Elders: Which gate leads to the Golden Trophy at the final junction?',
+    question: "What has keys but cannot open locks?",
     options: [
-      { text: 'The Moon Gate on the Left Branch', correct: true, clue: 'CLUE DISCOVERED: Choose the MOON GATE at the final junction!' },
-      { text: 'The Sun Gate on the Right Branch', correct: false },
-      { text: 'Neither, both lead to traps', correct: false }
-    ]
+      { text: 'A Treasure Chest', correct: false },
+      { text: 'A Piano', correct: true, clue: 'CLUE DISCOVERED: At the final split, the MOON GATE leads to the Trophy Shrine!' },
+      { text: 'A Door', correct: false },
+      { text: 'A Map', correct: false }
+    ],
+    successMessage: 'Left Riddle Gate Unlocked! The Left Branch continues.'
   },
   {
     id: 'door2',
-    name: 'Cursed Iron Gate',
+    name: 'Right Shadow Gate',
+    branch: 'Right Branch (Route 2)',
     position: [25, 0, -35],
     rotation: [0, 0, 0],
-    type: 'trap',
-    message: 'WARNING: You unlocked a Cursed Trap Door! The path leads to a dead end.'
+    type: 'riddle',
+    question: "How many distinct branching routes split from the entrance junction of this forest maze?",
+    options: [
+      { text: 'Two Routes', correct: false },
+      { text: 'Three Routes', correct: true, clue: 'CLUE DISCOVERED: Beware the Sun Gate—it conceals a deadly dead-end trap!' },
+      { text: 'Four Routes', correct: false },
+      { text: 'Five Routes', correct: false }
+    ],
+    successMessage: 'Right Shadow Gate Unlocked! The Right Branch continues.'
   },
   {
     id: 'door3',
-    name: 'Ancient Forest Gate',
+    name: 'Center Ancient Gate',
+    branch: 'Center Branch (Route 3)',
     position: [-10, 0, -40],
     rotation: [0, Math.PI / 2, 0],
-    type: 'standard',
-    message: 'Ancient Gate Unlocked!'
+    type: 'riddle',
+    question: "What is the safest action when you encounter a locked gate?",
+    options: [
+      { text: 'Run through it', correct: false },
+      { text: 'Ignore the rules', correct: false },
+      { text: 'Inspect it and solve its riddle', correct: true, clue: 'CLUE DISCOVERED: The Golden Trophy waits in the northern sanctuary!' },
+      { text: 'Jump through the wall', correct: false }
+    ],
+    successMessage: 'Center Ancient Gate Unlocked! The Center Branch continues.'
   },
   {
     id: 'doorA',
-    name: 'Ancient Moon Gate (Left)',
+    name: 'Ancient Moon Gate (Final Door)',
+    branch: 'Final Split - Left Exit',
     position: [-30, 0, -140],
     rotation: [0, 0, 0],
-    type: 'final_moon',
-    isCorrectExit: true
+    type: 'passcode',
+    passcode: '472',
+    question: "Celestial Moon Gate: 'Enter the 3-digit secret passcode revealed by the hidden forest runes.'",
+    isCorrectExit: true,
+    successMessage: 'Ancient Moon Gate Unlocked! The path to the Golden Trophy Sanctuary is open!'
   },
   {
     id: 'doorB',
-    name: 'Ancient Sun Gate (Right)',
+    name: 'Cursed Sun Gate (Right)',
+    branch: 'Final Split - Right Exit',
     position: [30, 0, -140],
     rotation: [0, 0, 0],
-    type: 'final_sun',
-    isCorrectExit: false
+    type: 'trap',
+    question: "The Sun Gate radiates burning heat: 'Dare you breach the forbidden Sun Gate into the unknown?'",
+    options: [
+      { text: 'Force the doors open', correct: false },
+      { text: 'Step through into the light', correct: false },
+      { text: 'Shatter the rusted seal', correct: false },
+      { text: 'Turn back to the Moon Gate', correct: true, clue: 'You wisely stepped back! Choose the Moon Gate!' }
+    ],
+    isCorrectExit: false,
+    message: 'WARNING: You triggered the Cursed Sun Gate trap!'
   }
 ];
 
@@ -112,27 +184,29 @@ export function pointToSegmentDistance(px, pz, ax, az, bx, bz) {
 
 // Strict Walkability Validator: Checks if (x, z) is within allowed path radius
 export function getClosestPathPosition(px, pz, unlockedDoors = {}) {
+  const margin = 0.2; // Generous walkable path radius while keeping player on dirt path
   let minDistance = Infinity;
-  let bestX = px;
-  let bestZ = pz;
+  let bestClampedX = px;
+  let bestClampedZ = pz;
+  let bestNormalX = 0;
+  let bestNormalZ = 0;
   let bestSegDx = 0;
   let bestSegDz = -1;
-  let isOnPath = false;
 
   for (const seg of PATH_SEGMENTS) {
     if (seg.requiredDoor && !unlockedDoors[seg.requiredDoor]) {
       continue;
     }
 
+    const walkRadius = seg.radius - margin;
     const { dist, projX, projZ, segDx, segDz } = pointToSegmentDistance(
       px, pz,
       seg.p1[0], seg.p1[1],
       seg.p2[0], seg.p2[1]
     );
 
-    if (dist <= seg.radius) {
-      isOnPath = true;
-      return { isOnPath: true, clampedX: px, clampedZ: pz, segDx, segDz };
+    if (dist <= walkRadius) {
+      return { isOnPath: true, clampedX: px, clampedZ: pz, normalX: 0, normalZ: 0, segDx, segDz };
     }
 
     if (dist < minDistance) {
@@ -140,10 +214,88 @@ export function getClosestPathPosition(px, pz, unlockedDoors = {}) {
       bestSegDx = segDx;
       bestSegDz = segDz;
       const angle = Math.atan2(pz - projZ, px - projX);
-      bestX = projX + Math.cos(angle) * (seg.radius - 0.2);
-      bestZ = projZ + Math.sin(angle) * (seg.radius - 0.2);
+      bestNormalX = Math.cos(angle);
+      bestNormalZ = Math.sin(angle);
+      bestClampedX = projX + bestNormalX * walkRadius;
+      bestClampedZ = projZ + bestNormalZ * walkRadius;
     }
   }
 
-  return { isOnPath, clampedX: bestX, clampedZ: bestZ, segDx: bestSegDx, segDz: bestSegDz };
+  return { isOnPath: false, clampedX: bestClampedX, clampedZ: bestClampedZ, normalX: bestNormalX, normalZ: bestNormalZ, segDx: bestSegDx, segDz: bestSegDz };
+}
+
+// Strict Gate Physical & Kinematic Collision Barriers
+// Stops the player completely at locked gates even when holding W, running, or moving diagonally
+export const GATE_COLLISION_BARRIERS = [
+  {
+    id: 'door1',
+    name: 'Left Riddle Gate',
+    // Gate at [-35, 0, -30], rotation 0 (blocks Z <= -28.6 from approach side z > -30)
+    check: (x, z, vx, vz) => {
+      if (vz !== undefined && vz > 0.01) return false; // Moving backward away from gate
+      return Math.abs(x - (-35)) <= 3.8 && z <= -28.6 && z >= -34.5;
+    },
+    barrierAxis: 'z',
+    stopX: null,
+    stopZ: -28.5,
+  },
+  {
+    id: 'door2',
+    name: 'Right Shadow Gate',
+    // Gate at [25, 0, -35], rotation 0 (blocks Z <= -33.6 from approach side z > -35)
+    check: (x, z, vx, vz) => {
+      if (vz !== undefined && vz > 0.01) return false; // Moving backward away from gate
+      return Math.abs(x - 25) <= 3.8 && z <= -33.6 && z >= -39.5;
+    },
+    barrierAxis: 'z',
+    stopX: null,
+    stopZ: -33.5,
+  },
+  {
+    id: 'door3',
+    name: 'Center Ancient Gate',
+    // Gate at [-10, 0, -40], rotation PI/2 (blocks X >= -11.5 from approach side x < -10)
+    check: (x, z, vx, vz) => {
+      if (vx !== undefined && vx < -0.01) return false; // Moving westward away from gate
+      return Math.abs(z - (-40)) <= 3.8 && x >= -11.5 && x <= -5.5;
+    },
+    barrierAxis: 'x',
+    stopX: -11.6,
+    stopZ: null,
+  },
+  {
+    id: 'doorA',
+    name: 'Ancient Moon Gate (Final Door)',
+    // Gate at [-30, 0, -140], rotation 0 (blocks Z <= -138.6 from approach side z > -140)
+    check: (x, z, vx, vz) => {
+      if (vz !== undefined && vz > 0.01) return false; // Moving backward away from gate
+      return Math.abs(x - (-30)) <= 3.8 && z <= -138.6 && z >= -144.5;
+    },
+    barrierAxis: 'z',
+    stopX: null,
+    stopZ: -138.5,
+  },
+  {
+    id: 'doorB',
+    name: 'Cursed Sun Gate (Right)',
+    // Gate at [30, 0, -140], rotation 0 (blocks Z <= -138.6 from approach side z > -140)
+    check: (x, z, vx, vz) => {
+      if (vz !== undefined && vz > 0.01) return false; // Moving backward away from gate
+      return Math.abs(x - 30) <= 3.8 && z <= -138.6 && z >= -144.5;
+    },
+    barrierAxis: 'z',
+    stopX: null,
+    stopZ: -138.5,
+  }
+];
+
+export function checkGateCollision(x, z, unlockedDoors = {}, vx, vz) {
+  for (const gate of GATE_COLLISION_BARRIERS) {
+    if (!unlockedDoors[gate.id]) {
+      if (gate.check(x, z, vx, vz)) {
+        return { isBlocked: true, gate };
+      }
+    }
+  }
+  return { isBlocked: false, gate: null };
 }

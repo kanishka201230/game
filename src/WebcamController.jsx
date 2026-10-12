@@ -1,78 +1,236 @@
-import React, { useEffect, useRef, useState } from "react";
-import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+
+// MediaPipe Hand Connection Pairs for Skeletal Visualizer
+const HAND_CONNECTIONS = [
+  // Thumb
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  // Index
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  // Middle
+  [0, 9], [9, 10], [10, 11], [11, 12],
+  // Ring
+  [0, 13], [13, 14], [14, 15], [15, 16],
+  // Pinky
+  [0, 17], [17, 18], [18, 19], [19, 20],
+  // Palm Base Crossbars
+  [5, 9], [9, 13], [13, 17]
+];
+
+// Distance helper
+function dist3D(p1, p2) {
+  if (!p1 || !p2) return 0;
+  const dx = p1.x - p2.x;
+  const dy = p1.y - p2.y;
+  const dz = (p1.z || 0) - (p2.z || 0);
+  return Math.hypot(dx, dy, dz);
+}
+
+// 4 Reference Gestures Classifier
+function classifyHandGesture(lm, mirror = true) {
+  if (!lm || lm.length < 21) return { gesture: "NO GESTURE", confidence: 0 };
+
+  // Scale invariance: distance from Wrist (0) to Middle MCP (9)
+  const handScale = dist3D(lm[0], lm[9]) || 0.2;
+
+  // 1. Index Finger Analysis (MCP 5, PIP 6, DIP 7, TIP 8)
+  const tipMcpIndex = dist3D(lm[8], lm[5]);
+  const pipMcpIndex = dist3D(lm[6], lm[5]) || 0.001;
+  const ratioIndex = tipMcpIndex / pipMcpIndex;
+  const tipWristIndex = dist3D(lm[8], lm[0]);
+  const pipWristIndex = dist3D(lm[6], lm[0]);
+  const isIndexExtended = ratioIndex > 1.35 && tipWristIndex > pipWristIndex * 1.15;
+  const isIndexCurled = ratioIndex < 1.15 || tipWristIndex < pipWristIndex * 1.05;
+
+  // 2. Middle Finger Analysis (MCP 9, PIP 10, DIP 11, TIP 12)
+  const tipMcpMiddle = dist3D(lm[12], lm[9]);
+  const pipMcpMiddle = dist3D(lm[10], lm[9]) || 0.001;
+  const ratioMiddle = tipMcpMiddle / pipMcpMiddle;
+  const tipWristMiddle = dist3D(lm[12], lm[0]);
+  const pipWristMiddle = dist3D(lm[10], lm[0]);
+  const isMiddleExtended = ratioMiddle > 1.35 && tipWristMiddle > pipWristMiddle * 1.15;
+  const isMiddleCurled = ratioMiddle < 1.15 || tipWristMiddle < pipWristMiddle * 1.05;
+
+  // 3. Ring Finger Analysis (MCP 13, PIP 14, DIP 15, TIP 16)
+  const tipMcpRing = dist3D(lm[16], lm[13]);
+  const pipMcpRing = dist3D(lm[14], lm[13]) || 0.001;
+  const ratioRing = tipMcpRing / pipMcpRing;
+  const tipWristRing = dist3D(lm[16], lm[0]);
+  const pipWristRing = dist3D(lm[14], lm[0]);
+  const isRingExtended = ratioRing > 1.35 && tipWristRing > pipWristRing * 1.15;
+  const isRingCurled = ratioRing < 1.15 || tipWristRing < pipWristRing * 1.05;
+
+  // 4. Pinky Finger Analysis (MCP 17, PIP 18, DIP 19, TIP 20)
+  const tipMcpPinky = dist3D(lm[20], lm[17]);
+  const pipMcpPinky = dist3D(lm[18], lm[17]) || 0.001;
+  const ratioPinky = tipMcpPinky / pipMcpPinky;
+  const tipWristPinky = dist3D(lm[20], lm[0]);
+  const pipWristPinky = dist3D(lm[18], lm[0]);
+  const isPinkyExtended = ratioPinky > 1.35 && tipWristPinky > pipWristPinky * 1.15;
+  const isPinkyCurled = ratioPinky < 1.15 || tipWristPinky < pipWristPinky * 1.05;
+
+  // 5. Thumb Orientation
+  // In finger-gun/L-shape, thumb is extended upwards (lm[4].y is notably above lm[2].y or MCPs)
+  const thumbTipWrist = dist3D(lm[4], lm[0]);
+  const thumbMcpWrist = dist3D(lm[2], lm[0]);
+  const isThumbUp = lm[4].y < lm[2].y + 0.04 || thumbTipWrist > thumbMcpWrist * 1.2;
+
+  // Extended count for palm detection
+  const extendedCount = (isIndexExtended ? 1 : 0) + (isMiddleExtended ? 1 : 0) + (isRingExtended ? 1 : 0) + (isPinkyExtended ? 1 : 0);
+  const curledCount = (isIndexCurled ? 1 : 0) + (isMiddleCurled ? 1 : 0) + (isRingCurled ? 1 : 0) + (isPinkyCurled ? 1 : 0);
+
+  // GESTURE 2 — FORWARD (Reference Photo 2: Open Palm)
+  // All fingers extended, palm facing forward
+  if (extendedCount >= 3 && isMiddleExtended && isRingExtended) {
+    return { gesture: "FORWARD", confidence: 0.95 };
+  }
+
+  // GESTURE 3 & 4 — MOVE RIGHT & MOVE LEFT (Reference Photos 3 & 4: Thumb Up + Index Pointing)
+  // Index extended while Middle, Ring, Pinky are curled into palm
+  if (isIndexExtended && isMiddleCurled && isRingCurled && isPinkyCurled) {
+    // Vector from Index MCP (5) to Index Tip (8)
+    // On screen (mirrored preview): screenX = (1 - x)
+    const screenTipX = mirror ? (1 - lm[8].x) : lm[8].x;
+    const screenBaseX = mirror ? (1 - lm[5].x) : lm[5].x;
+    const dx = screenTipX - screenBaseX;
+    const dy = lm[8].y - lm[5].y;
+
+    // Check predominantly horizontal pointing
+    if (Math.abs(dx) > Math.abs(dy) * 0.55 && Math.abs(dx) > 0.04) {
+      if (dx > 0) {
+        // Pointing to the RIGHT of the screen/preview (Photo 3)
+        return { gesture: "RIGHT", confidence: 0.92 };
+      } else {
+        // Pointing to the LEFT of the screen/preview (Photo 4)
+        return { gesture: "LEFT", confidence: 0.92 };
+      }
+    }
+  }
+
+  // GESTURE 1 — STOP (Reference Photo 1: Closed Fist)
+  // All 4 fingers (Index, Middle, Ring, Pinky) curled into palm, thumb wrapped
+  if (curledCount >= 3 && !isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended) {
+    return { gesture: "STOP", confidence: 0.96 };
+  }
+
+  return { gesture: "NO GESTURE", confidence: 0.5 };
+}
 
 export default function WebcamController({ onUpdateInputs }) {
   const [isEnabled, setIsEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
-  const [trackingStatus, setTrackingStatus] = useState({
-    runnerTracked: false,
-    attackerTracked: false,
-    message: "Webcam disabled (Keyboard Controls Active)",
-  });
-  const [sensitivity, setSensitivity] = useState(1.0);
-  const [showCalibration, setShowCalibration] = useState(false);
+  const [targetCharacter, setTargetCharacter] = useState("player"); // "player" | "attacker"
+  const [currentGesture, setCurrentGesture] = useState("NO GESTURE");
+  const [statusMessage, setStatusMessage] = useState("Webcam Disabled (Keyboard Controls Active)");
+  const [showGuide, setShowGuide] = useState(false);
+  const [mirrorDirection, setMirrorDirection] = useState(true);
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const landmarkerRef = useRef(null);
   const animFrameId = useRef(null);
+  const historyRef = useRef([]);
+  const targetCharRef = useRef(targetCharacter);
+  targetCharRef.current = targetCharacter;
 
-  // Velocity / Gesture History Buffers for smoothing
-  const historyRef = useRef({
-    p1PrevHipY: 0,
-    p2PrevHipY: 0,
-    p1PrevShoulderY: 0,
-    p1RunTicks: 0,
-    p2RunTicks: 0,
-    attackCooldown: 0,
-  });
+  // Keep character routing up to date
+  const emitInputs = useCallback((gesture, target) => {
+    const isMoving = gesture === "FORWARD" || gesture === "LEFT" || gesture === "RIGHT";
+    const moveInput = {
+      forward: gesture === "FORWARD",
+      backward: false,
+      left: gesture === "LEFT",
+      right: gesture === "RIGHT",
+      stop: gesture === "STOP",
+    };
 
-  // Initialize MediaPipe PoseLandmarker
+    if (target === "player") {
+      onUpdateInputs({
+        runner: moveInput,
+        attacker: { isManualControl: false } // Attacker resumes autonomous AI patrol
+      });
+    } else {
+      onUpdateInputs({
+        runner: {}, // Player stops
+        attacker: {
+          ...moveInput,
+          isManualControl: true // Attacker exclusively controlled by gestures
+        }
+      });
+    }
+  }, [onUpdateInputs]);
+
+  // Handle character switch dynamically
+  const handleSelectCharacter = (char) => {
+    setTargetCharacter(char);
+    emitInputs(currentGesture, char);
+  };
+
+  // Initialize MediaPipe HandLandmarker
   useEffect(() => {
     let active = true;
 
-    async function initPoseLandmarker() {
+    async function initHandLandmarker() {
       if (!isEnabled) return;
       setIsLoading(true);
-      setTrackingStatus({ runnerTracked: false, attackerTracked: false, message: "Loading MediaPipe PoseLandmarker..." });
+      setStatusMessage("Loading MediaPipe Hand Landmarker...");
 
       try {
         const vision = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
         );
-        
-        if (!active) return;
-
-        const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numPoses: 2,
-        });
 
         if (!active) return;
-        landmarkerRef.current = poseLandmarker;
+
+        // Try local model with CPU delegate to preserve GPU WebGL context for Three.js Canvas
+        let handLandmarker = null;
+        try {
+          handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: "/hand_landmarker.task",
+              delegate: "CPU",
+            },
+            runningMode: "VIDEO",
+            numHands: 1,
+            minHandDetectionConfidence: 0.5,
+            minHandPresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5,
+          });
+        } catch (firstErr) {
+          console.warn("Local HandLandmarker init failed, falling back to CDN:", firstErr);
+          try {
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+              baseOptions: {
+                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                delegate: "CPU",
+              },
+              runningMode: "VIDEO",
+              numHands: 1,
+            });
+          } catch (fallbackErr) {
+            console.warn("CDN HandLandmarker fallback also failed:", fallbackErr);
+          }
+        }
+
+        if (!active) return;
+        landmarkerRef.current = handLandmarker;
         setIsLoading(false);
         startCamera();
       } catch (err) {
-        console.error("Failed to load PoseLandmarker:", err);
+        console.error("Failed to load HandLandmarker:", err);
         setIsLoading(false);
-        setTrackingStatus({
-          runnerTracked: false,
-          attackerTracked: false,
-          message: "PoseLandmarker Error (Keyboard Fallback Active)",
-        });
+        setStatusMessage("⚠️ Camera/Model Error (Keyboard Fallback Active)");
       }
     }
 
     if (isEnabled) {
-      initPoseLandmarker();
+      initHandLandmarker();
     } else {
       stopCamera();
+      setCurrentGesture("NO GESTURE");
+      // Reset inputs safely
+      onUpdateInputs({ runner: {}, attacker: { isManualControl: false } });
     }
 
     return () => {
@@ -81,30 +239,29 @@ export default function WebcamController({ onUpdateInputs }) {
     };
   }, [isEnabled]);
 
-  // Start Video Stream
+  // Start Camera Stream
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, facingMode: "user" },
+        video: { width: 480, height: 360, facingMode: "user" },
       });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
           videoRef.current.play();
           setCameraActive(true);
+          setStatusMessage("🟢 Camera Active — Ready for Gestures");
           processVideoLoop();
         };
       }
     } catch (err) {
       console.error("Webcam Access Denied / Error:", err);
-      setTrackingStatus({
-        runnerTracked: false,
-        attackerTracked: false,
-        message: "Webcam Access Denied (Keyboard Fallback Active)",
-      });
+      setStatusMessage("⚠️ Webcam Access Denied (Check Browser Permissions)");
+      setCameraActive(false);
     }
   };
 
+  // Stop Camera Stream & Safely Release Tracks
   const stopCamera = () => {
     if (animFrameId.current) {
       cancelAnimationFrame(animFrameId.current);
@@ -115,9 +272,10 @@ export default function WebcamController({ onUpdateInputs }) {
       videoRef.current.srcObject = null;
     }
     setCameraActive(false);
+    setStatusMessage("Webcam Disabled (Keyboard Controls Active)");
   };
 
-  // Main Detection & Movement Analysis Loop
+  // Detection & Analysis Loop
   const processVideoLoop = () => {
     const video = videoRef.current;
     const landmarker = landmarkerRef.current;
@@ -126,149 +284,162 @@ export default function WebcamController({ onUpdateInputs }) {
       const timestamp = performance.now();
       const results = landmarker.detectForVideo(video, timestamp);
 
-      drawSkeleton(results);
-      analyzePoses(results);
+      drawHandSkeleton(results);
+      analyzeHand(results);
     }
 
     animFrameId.current = requestAnimationFrame(processVideoLoop);
   };
 
-  // Draw Skeleton Overlay on Canvas
-  const drawSkeleton = (results) => {
+  // Draw Glowing Neon Skeleton & Gesture Label on Canvas
+  const drawHandSkeleton = (results) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (!results || !results.landmarks || results.landmarks.length === 0) return;
-
-    results.landmarks.forEach((landmarks, index) => {
-      const color = index === 0 ? "#00ffcc" : "#ff3366";
-      ctx.fillStyle = color;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-
-      landmarks.forEach((lm) => {
-        const x = (1 - lm.x) * canvas.width; // Mirror horizontal
-        const y = lm.y * canvas.height;
-        ctx.beginPath();
-        ctx.arc(x, y, 4, 0, 2 * Math.PI);
-        ctx.fill();
-      });
-    });
-  };
-
-  // Process Keypoints & Extract Movement Commands for Both Players
-  const analyzePoses = (results) => {
-    const runnerInputs = { forward: false, backward: false, left: false, right: false, jump: false, run: false, interact: false };
-    const attackerInputs = { forward: false, backward: false, left: false, right: false, attack: false };
-
     if (!results || !results.landmarks || results.landmarks.length === 0) {
-      setTrackingStatus({
-        runnerTracked: false,
-        attackerTracked: false,
-        message: "⚠️ No Participants Detected (Keyboard Fallback Active)",
-      });
-      onUpdateInputs({ runner: runnerInputs, attacker: attackerInputs });
+      // Gentle hint overlay when no hand is in frame
+      ctx.fillStyle = "rgba(40, 60, 50, 0.4)";
+      ctx.font = "11px 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Place hand in frame", canvas.width / 2, canvas.height / 2);
       return;
     }
 
-    // Sort poses by horizontal X position (Left = Person 1 / Runner, Right = Person 2 / Attacker)
-    const poses = [...results.landmarks].sort((a, b) => a[0].x - b[0].x);
+    const landmarks = results.landmarks[0];
+    const isAttacker = targetCharRef.current === "attacker";
+    const primaryColor = isAttacker ? "#ff1744" : "#2ae9aa";
+    const jointColor = "#ffffff";
 
-    const hist = historyRef.current;
-    if (hist.attackCooldown > 0) hist.attackCooldown--;
+    // 1. Draw Bones (Connections)
+    ctx.strokeStyle = primaryColor;
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.shadowColor = primaryColor;
+    ctx.shadowBlur = 6;
 
-    // 1. RUNNER CONTROLS (Person 1)
-    const p1 = poses[0];
-    if (p1) {
-      // Hip landmarks (23, 24)
-      const hipY = (p1[23].y + p1[24].y) / 2;
-      const hipX = (p1[23].x + p1[24].x) / 2;
-      const shoulderY = (p1[11].y + p1[12].y) / 2;
+    HAND_CONNECTIONS.forEach(([i, j]) => {
+      const p1 = landmarks[i];
+      const p2 = landmarks[j];
+      const x1 = (1 - p1.x) * canvas.width; // Mirror horizontally
+      const y1 = p1.y * canvas.height;
+      const x2 = (1 - p2.x) * canvas.width;
+      const y2 = p2.y * canvas.height;
 
-      // Running in place detection (vertical hip oscillation)
-      const hipDelta = Math.abs(hipY - hist.p1PrevHipY);
-      if (hipDelta > 0.008 * sensitivity) {
-        hist.p1RunTicks = 12;
-      }
-      if (hist.p1RunTicks > 0) {
-        runnerInputs.forward = true;
-        if (hipDelta > 0.02 * sensitivity) {
-          runnerInputs.run = true;
-        }
-        hist.p1RunTicks--;
-      }
-
-      // Leaning Left / Right
-      const torsoCenterOffset = 0.5 - hipX;
-      if (torsoCenterOffset > 0.12 * sensitivity) {
-        runnerInputs.left = true;
-      } else if (torsoCenterOffset < -0.12 * sensitivity) {
-        runnerInputs.right = true;
-      }
-
-      // Jump Gesture (Upward displacement of shoulders)
-      const shoulderDelta = hist.p1PrevShoulderY - shoulderY;
-      if (shoulderDelta > 0.04 * sensitivity) {
-        runnerInputs.jump = true;
-      }
-
-      // Interact Gesture (Right wrist raised above right shoulder)
-      const rightWristY = p1[16].y;
-      const rightShoulderY = p1[12].y;
-      if (rightWristY < rightShoulderY - 0.1) {
-        runnerInputs.interact = true;
-      }
-
-      hist.p1PrevHipY = hipY;
-      hist.p1PrevShoulderY = shoulderY;
-    }
-
-    // 2. ATTACKER CONTROLS (Person 2 if present)
-    const p2 = poses.length > 1 ? poses[1] : null;
-
-    if (p2) {
-      const hipY = (p2[23].y + p2[24].y) / 2;
-      const hipX = (p2[23].x + p2[24].x) / 2;
-
-      const hipDelta = Math.abs(hipY - hist.p2PrevHipY);
-      if (hipDelta > 0.008 * sensitivity) {
-        hist.p2RunTicks = 12;
-      }
-      if (hist.p2RunTicks > 0) {
-        attackerInputs.forward = true;
-        hist.p2RunTicks--;
-      }
-
-      const torsoCenterOffset = 0.5 - hipX;
-      if (torsoCenterOffset > 0.12 * sensitivity) {
-        attackerInputs.left = true;
-      } else if (torsoCenterOffset < -0.12 * sensitivity) {
-        attackerInputs.right = true;
-      }
-
-      // Attack Gesture (Left wrist raised above left shoulder)
-      const leftWristY = p2[15].y;
-      const leftShoulderY = p2[11].y;
-      if (leftWristY < leftShoulderY - 0.1 && hist.attackCooldown === 0) {
-        attackerInputs.attack = true;
-        hist.attackCooldown = 45; // Cooldown frames
-      }
-
-      hist.p2PrevHipY = hipY;
-    }
-
-    setTrackingStatus({
-      runnerTracked: true,
-      attackerTracked: Boolean(p2),
-      message: p2
-        ? "🟢 Both Runner & Attacker Tracked!"
-        : "🟢 Runner Tracked | ⚠️ Attacker 2 Not Detected (AI Fallback Active)",
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
     });
 
-    onUpdateInputs({ runner: runnerInputs, attacker: attackerInputs });
+    // 2. Draw Landmark Joints
+    ctx.shadowBlur = 4;
+    landmarks.forEach((p, idx) => {
+      const x = (1 - p.x) * canvas.width;
+      const y = p.y * canvas.height;
+      ctx.fillStyle = idx === 8 || idx === 4 ? "#ffd700" : jointColor;
+      ctx.beginPath();
+      ctx.arc(x, y, idx === 8 ? 4.5 : 3, 0, 2 * Math.PI);
+      ctx.fill();
+    });
+    ctx.shadowBlur = 0;
   };
+
+  // Stabilize and Emit Recognized Gesture
+  const analyzeHand = (results) => {
+    if (!results || !results.landmarks || results.landmarks.length === 0) {
+      updateGestureBuffer("NO GESTURE");
+      return;
+    }
+
+    const lm = results.landmarks[0];
+    const { gesture } = classifyHandGesture(lm, mirrorDirection);
+    updateGestureBuffer(gesture);
+  };
+
+  // Rolling Temporal Stabilization Filter (Avoids jitter & single-frame misdetections)
+  const updateGestureBuffer = (rawGesture) => {
+    const hist = historyRef.current;
+    hist.push(rawGesture);
+    if (hist.length > 5) hist.shift();
+
+    // Frequency counting
+    const counts = {};
+    hist.forEach((g) => {
+      counts[g] = (counts[g] || 0) + 1;
+    });
+
+    let bestGesture = rawGesture;
+    let maxCount = 0;
+    for (const g in counts) {
+      if (counts[g] > maxCount) {
+        maxCount = counts[g];
+        bestGesture = g;
+      }
+    }
+
+    // Require majority consensus (at least 3 of 5 frames) to switch gesture
+    if (maxCount >= 3) {
+      if (bestGesture !== currentGesture) {
+        setCurrentGesture(bestGesture);
+        emitInputs(bestGesture, targetCharRef.current);
+      }
+    }
+  };
+
+  // Visual Styling Helpers for Gestures
+  const getGestureBadge = (gesture) => {
+    switch (gesture) {
+      case "STOP":
+        return {
+          icon: "✊",
+          label: "STOP",
+          desc: "Closed Fist",
+          color: "#f87171",
+          bg: "rgba(127, 29, 29, 0.4)",
+          border: "#ef4444"
+        };
+      case "FORWARD":
+        return {
+          icon: "🖐️",
+          label: "MOVE FORWARD",
+          desc: "Open Palm",
+          color: "#4ade80",
+          bg: "rgba(20, 83, 45, 0.4)",
+          border: "#22c55e"
+        };
+      case "RIGHT":
+        return {
+          icon: "👉",
+          label: "MOVE RIGHT",
+          desc: "Point Right (Thumb Up)",
+          color: "#38bdf8",
+          bg: "rgba(12, 74, 110, 0.4)",
+          border: "#0284c7"
+        };
+      case "LEFT":
+        return {
+          icon: "👈",
+          label: "MOVE LEFT",
+          desc: "Point Left (Thumb Up)",
+          color: "#38bdf8",
+          bg: "rgba(12, 74, 110, 0.4)",
+          border: "#0284c7"
+        };
+      default:
+        return {
+          icon: "✋",
+          label: "NO GESTURE",
+          desc: "Show Hand in Camera",
+          color: "#94a3b8",
+          bg: "rgba(30, 41, 59, 0.4)",
+          border: "#475569"
+        };
+    }
+  };
+
+  const badge = getGestureBadge(currentGesture);
 
   return (
     <div
@@ -276,107 +447,313 @@ export default function WebcamController({ onUpdateInputs }) {
         position: "absolute",
         top: 20,
         right: 20,
-        zIndex: 100,
+        zIndex: 120,
         fontFamily: "'Segoe UI', Roboto, sans-serif",
       }}
     >
-      {/* Toggle Webcam Controller Card */}
+      {/* Main Glassmorphic Control Panel */}
       <div
         style={{
-          background: "rgba(12, 25, 18, 0.9)",
-          border: "1px solid rgba(120, 180, 130, 0.35)",
-          borderRadius: "12px",
-          padding: "14px 18px",
+          background: "linear-gradient(180deg, rgba(6, 24, 18, 0.94) 0%, rgba(3, 15, 11, 0.98) 100%)",
+          border: `1.5px solid ${targetCharacter === "player" ? "rgba(42, 233, 170, 0.45)" : "rgba(255, 23, 68, 0.45)"}`,
+          borderRadius: "16px",
+          padding: "14px 16px",
           color: "#e2f0d9",
-          boxShadow: "0 6px 25px rgba(0,0,0,0.5)",
+          boxShadow: "0 8px 32px rgba(0,0,0,0.7), inset 0 0 20px rgba(42, 233, 170, 0.06)",
+          backdropFilter: "blur(16px)",
           width: "280px",
+          boxSizing: "border-box"
         }}
       >
+        {/* Top Header & Toggle */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-          <h4 style={{ margin: 0, letterSpacing: "1px", color: "#a8e0b0", fontSize: "14px" }}>📹 WEBCAM POSE BODY CONTROLS</h4>
-          <input
-            type="checkbox"
-            checked={isEnabled}
-            onChange={(e) => setIsEnabled(e.target.checked)}
-            style={{ width: "18px", height: "18px", cursor: "pointer" }}
-            title="Toggle Webcam Tracking"
-          />
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ fontSize: "16px" }}>✋</span>
+            <span style={{
+              fontFamily: "'Cinzel', serif, Georgia",
+              fontWeight: 800,
+              fontSize: "13px",
+              color: "#73f5c7",
+              letterSpacing: "1px"
+            }}>
+              GESTURE CONTROLS
+            </span>
+          </div>
+
+          <label style={{ display: "flex", alignItems: "center", cursor: "pointer", position: "relative" }}>
+            <input
+              type="checkbox"
+              checked={isEnabled}
+              onChange={(e) => setIsEnabled(e.target.checked)}
+              style={{ display: "none" }}
+            />
+            <div style={{
+              width: "38px",
+              height: "20px",
+              borderRadius: "10px",
+              background: isEnabled ? "#10b981" : "rgba(50, 60, 55, 0.8)",
+              position: "relative",
+              transition: "background 0.25s ease",
+              boxShadow: isEnabled ? "0 0 12px rgba(16, 185, 129, 0.6)" : "none"
+            }}>
+              <div style={{
+                width: "16px",
+                height: "16px",
+                borderRadius: "50%",
+                background: "#ffffff",
+                position: "absolute",
+                top: "2px",
+                left: isEnabled ? "20px" : "2px",
+                transition: "left 0.25s ease",
+                boxShadow: "0 2px 4px rgba(0,0,0,0.3)"
+              }} />
+            </div>
+          </label>
         </div>
 
-        {/* Tracking Status Badge */}
-        <div style={{ fontSize: "11px", marginBottom: "10px", lineHeight: "1.4", color: isEnabled ? "#cce6d0" : "#a0b0a2" }}>
-          {trackingStatus.message}
+        {/* Character Selector Mode (Requirement 2) */}
+        <div style={{ marginBottom: "12px" }}>
+          <div style={{ fontSize: "10px", color: "#a7f3d0", letterSpacing: "1px", marginBottom: "5px", fontWeight: 700 }}>
+            TARGET CHARACTER:
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              onClick={() => handleSelectCharacter("player")}
+              style={{
+                flex: 1,
+                padding: "8px 6px",
+                borderRadius: "8px",
+                border: targetCharacter === "player" ? "2px solid #2ae9aa" : "1px solid rgba(82, 183, 136, 0.3)",
+                background: targetCharacter === "player" ? "rgba(42, 233, 170, 0.2)" : "rgba(10, 25, 18, 0.6)",
+                color: targetCharacter === "player" ? "#ffffff" : "#a8e0b0",
+                fontSize: "12px",
+                fontWeight: 800,
+                fontFamily: "'Cinzel', serif",
+                letterSpacing: "0.5px",
+                cursor: "pointer",
+                boxShadow: targetCharacter === "player" ? "0 0 16px rgba(42, 233, 170, 0.4)" : "none",
+                transition: "all 0.2s"
+              }}
+            >
+              🏃 PLAYER
+            </button>
+
+            <button
+              onClick={() => handleSelectCharacter("attacker")}
+              style={{
+                flex: 1,
+                padding: "8px 6px",
+                borderRadius: "8px",
+                border: targetCharacter === "attacker" ? "2px solid #ff1744" : "1px solid rgba(255, 23, 68, 0.3)",
+                background: targetCharacter === "attacker" ? "rgba(255, 23, 68, 0.25)" : "rgba(30, 10, 15, 0.6)",
+                color: targetCharacter === "attacker" ? "#ffffff" : "#ffa4b4",
+                fontSize: "12px",
+                fontWeight: 800,
+                fontFamily: "'Cinzel', serif",
+                letterSpacing: "0.5px",
+                cursor: "pointer",
+                boxShadow: targetCharacter === "attacker" ? "0 0 16px rgba(255, 23, 68, 0.5)" : "none",
+                transition: "all 0.2s"
+              }}
+            >
+              👹 ATTACKER
+            </button>
+          </div>
         </div>
 
+        {/* Current Active Recognized Gesture Badge (Requirement 2 & 3) */}
+        <div style={{
+          background: badge.bg,
+          border: `1.5px solid ${badge.border}`,
+          borderRadius: "10px",
+          padding: "8px 12px",
+          marginBottom: "12px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          boxShadow: `0 0 16px ${badge.border}44`,
+          transition: "all 0.2s"
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ fontSize: "20px" }}>{badge.icon}</span>
+            <div>
+              <div style={{ fontSize: "12px", fontWeight: 800, color: badge.color, letterSpacing: "0.8px" }}>
+                {badge.label}
+              </div>
+              <div style={{ fontSize: "10px", color: "#cbd5e1" }}>
+                {badge.desc}
+              </div>
+            </div>
+          </div>
+          <span style={{
+            fontSize: "9px",
+            fontWeight: 800,
+            padding: "2px 6px",
+            borderRadius: "6px",
+            background: "rgba(0,0,0,0.4)",
+            color: badge.color,
+            border: `1px solid ${badge.border}`
+          }}>
+            {targetCharacter.toUpperCase()}
+          </span>
+        </div>
+
+        {/* Live Webcam Video & Skeleton Canvas Preview (Requirement 3) */}
         {isEnabled && (
-          <div>
-            {/* Live Video & Canvas Preview */}
-            <div style={{ position: "relative", width: "100%", height: "140px", background: "#08100b", borderRadius: "8px", overflow: "hidden", marginBottom: "10px" }}>
-              <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)" }} muted playsInline />
-              <canvas ref={canvasRef} width={240} height={140} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
+          <div style={{ marginBottom: "10px" }}>
+            <div style={{
+              position: "relative",
+              width: "100%",
+              height: "140px",
+              background: "#040e09",
+              borderRadius: "10px",
+              overflow: "hidden",
+              border: "1px solid rgba(42, 233, 170, 0.3)"
+            }}>
+              <video
+                ref={videoRef}
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  transform: "scaleX(-1)" // Mirrored selfie view
+                }}
+                muted
+                playsInline
+              />
+              <canvas
+                ref={canvasRef}
+                width={248}
+                height={140}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: "100%",
+                  pointerEvents: "none"
+                }}
+              />
+
+              {/* Loading Spinner */}
               {isLoading && (
-                <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", color: "#a8e0b0", fontSize: "12px" }}>
-                  Loading Pose Model...
+                <div style={{
+                  position: "absolute",
+                  inset: 0,
+                  background: "rgba(5, 18, 12, 0.85)",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "6px",
+                  color: "#2ae9aa",
+                  fontSize: "12px",
+                  fontWeight: "bold"
+                }}>
+                  <div style={{ fontSize: "20px" }}>⏳</div>
+                  <div>Loading Hand AI Model...</div>
                 </div>
               )}
             </div>
 
-            {/* Tracking Status Badges */}
-            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
-              <span style={{ flex: 1, padding: "4px 6px", borderRadius: "4px", fontSize: "10px", textAlign: "center", background: trackingStatus.runnerTracked ? "rgba(0, 255, 204, 0.2)" : "rgba(255, 0, 0, 0.2)", border: `1px solid ${trackingStatus.runnerTracked ? "#00ffcc" : "#ff3333"}`, color: "#fff" }}>
-                {trackingStatus.runnerTracked ? "🟢 Runner (P1)" : "❌ Runner Lost"}
-              </span>
-              <span style={{ flex: 1, padding: "4px 6px", borderRadius: "4px", fontSize: "10px", textAlign: "center", background: trackingStatus.attackerTracked ? "rgba(255, 51, 102, 0.2)" : "rgba(255, 165, 0, 0.2)", border: `1px solid ${trackingStatus.attackerTracked ? "#ff3366" : "#ffa500"}`, color: "#fff" }}>
-                {trackingStatus.attackerTracked ? "🟢 Attacker (P2)" : "🤖 AI Attacker"}
-              </span>
+            {/* Mirror Toggle Setting */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "6px", fontSize: "10px", color: "#94a3b8" }}>
+              <span>Webcam Orientation:</span>
+              <button
+                onClick={() => setMirrorDirection(!mirrorDirection)}
+                style={{
+                  background: "rgba(10, 30, 20, 0.8)",
+                  border: "1px solid rgba(42, 233, 170, 0.3)",
+                  borderRadius: "6px",
+                  color: "#2ae9aa",
+                  padding: "2px 8px",
+                  fontSize: "9px",
+                  fontWeight: "bold",
+                  cursor: "pointer"
+                }}
+              >
+                {mirrorDirection ? "🪞 Mirrored (Standard)" : "Normal"}
+              </button>
             </div>
+          </div>
+        )}
 
-            {/* Calibration & Sensitivity Slider */}
-            <div style={{ fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <label>Sensitivity:</label>
-              <input
-                type="range"
-                min="0.5"
-                max="2.0"
-                step="0.1"
-                value={sensitivity}
-                onChange={(e) => setSensitivity(parseFloat(e.target.value))}
-                style={{ width: "100px" }}
-              />
-              <span>{sensitivity.toFixed(1)}x</span>
+        {/* Connection Status Text */}
+        <div style={{ fontSize: "10px", color: "#94a3b8", marginBottom: "8px", textAlign: "center" }}>
+          {statusMessage}
+        </div>
+
+        {/* Quick Gesture Guide Dropdown / Drawer Button (Requirement 5) */}
+        <button
+          onClick={() => setShowGuide(!showGuide)}
+          style={{
+            width: "100%",
+            padding: "6px",
+            background: "rgba(15, 35, 25, 0.8)",
+            border: "1px solid rgba(82, 183, 136, 0.4)",
+            borderRadius: "8px",
+            color: "#a7f3d0",
+            fontSize: "11px",
+            fontWeight: 700,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "6px",
+            transition: "all 0.2s"
+          }}
+        >
+          <span>📖</span>
+          <span>{showGuide ? "Hide Gesture Guide" : "View 4 Reference Gestures"}</span>
+        </button>
+
+        {/* 4 Reference Gestures Guide Modal / Drawer */}
+        {showGuide && (
+          <div style={{
+            marginTop: "10px",
+            background: "rgba(4, 16, 12, 0.95)",
+            border: "1px solid rgba(42, 233, 170, 0.3)",
+            borderRadius: "10px",
+            padding: "10px",
+            fontSize: "11px",
+            lineHeight: "1.5"
+          }}>
+            <div style={{ fontWeight: 800, color: "#ffd700", marginBottom: "6px", fontSize: "11px", textAlign: "center" }}>
+              4 REFERENCE GESTURES GUIDE
             </div>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 6px", background: "rgba(20, 30, 25, 0.6)", borderRadius: "6px" }}>
+                <span style={{ fontSize: "16px" }}>✊</span>
+                <div>
+                  <b style={{ color: "#f87171" }}>STOP:</b> Closed fist. Immediately halts character.
+                </div>
+              </div>
 
-            <button
-              onClick={() => setShowCalibration(!showCalibration)}
-              style={{ width: "100%", marginTop: "8px", padding: "6px", background: "rgba(30, 60, 42, 0.8)", border: "1px solid #5a9e67", borderRadius: "6px", color: "#fff", fontSize: "11px", cursor: "pointer" }}
-            >
-              {showCalibration ? "Hide Pose Calibration Guide" : "Show Pose Gesture Guide"}
-            </button>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 6px", background: "rgba(20, 30, 25, 0.6)", borderRadius: "6px" }}>
+                <span style={{ fontSize: "16px" }}>🖐️</span>
+                <div>
+                  <b style={{ color: "#4ade80" }}>MOVE FORWARD:</b> Open palm. Walks forward along path.
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 6px", background: "rgba(20, 30, 25, 0.6)", borderRadius: "6px" }}>
+                <span style={{ fontSize: "16px" }}>👉</span>
+                <div>
+                  <b style={{ color: "#38bdf8" }}>MOVE RIGHT:</b> Thumb up, index pointing right.
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 6px", background: "rgba(20, 30, 25, 0.6)", borderRadius: "6px" }}>
+                <span style={{ fontSize: "16px" }}>👈</span>
+                <div>
+                  <b style={{ color: "#38bdf8" }}>MOVE LEFT:</b> Thumb up, index pointing left.
+                </div>
+              </div>
+            </div>
           </div>
         )}
       </div>
-
-      {/* CALIBRATION / GESTURE GUIDE MODAL */}
-      {showCalibration && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(5, 12, 8, 0.85)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300 }}>
-          <div style={{ background: "radial-gradient(circle at 50% 20%, #1e3626 0%, #0e1c13 100%)", border: "2px solid #a8e0b0", borderRadius: "14px", padding: "28px", width: "90%", maxWidth: "480px", color: "#e2f0d9", boxShadow: "0 0 40px rgba(168, 224, 176, 0.3)" }}>
-            <h3 style={{ color: "#a8e0b0", margin: "0 0 14px 0", letterSpacing: "1.5px" }}>🤸 WEBCAM BODY GESTURE CALIBRATION</h3>
-            <ul style={{ fontSize: "13px", lineHeight: "1.8", paddingLeft: "20px" }}>
-              <li><b>Run in Place:</b> Move legs/hips up & down to run forward.</li>
-              <li><b>Steer Left / Right:</b> Lean torso left or right to choose branches at maze junctions.</li>
-              <li><b>Jump:</b> Jump or dip shoulders upward.</li>
-              <li><b>Runner Door Interact:</b> Raise Right Hand above shoulder height.</li>
-              <li><b>Attacker Attack Action:</b> Person 2 raises Left Hand above shoulder height.</li>
-            </ul>
-            <button
-              onClick={() => setShowCalibration(false)}
-              style={{ width: "100%", marginTop: "16px", padding: "10px", background: "linear-gradient(135deg, #2e5938 0%, #142e1b 100%)", border: "1px solid #78b482", borderRadius: "8px", color: "#fff", fontWeight: "bold", cursor: "pointer" }}
-            >
-              Start Game with Webcam
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

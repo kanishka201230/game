@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebGL Diagnostics</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #eee; padding: 20px; }
+    .ok { color: #4ade80; }
+    .bad { color: #f87171; }
+    pre { background: #222; padding: 15px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h2>WebGL Diagnostic Tool</h2>
+  <div id="results">Running diagnostics...</div>
+
+  <script>
+    const res = document.getElementById('results');
+    let output = '';
+
+    function check() {
+      const c = document.createElement('canvas');
+      const w2 = c.getContext('webgl2');
+      const w1 = c.getContext('webgl') || c.getContext('experimental-webgl');
+      
+      output += '<h3>WebGL 2.0: ' + (w2 ? '<span class="ok">AVAILABLE</span>' : '<span class="bad">UNAVAILABLE</span>') + '</h3>';
+      if (w2) {
+        const ext = w2.getExtension('WEBGL_debug_renderer_info');
+        if (ext) {
+          output += '<pre>Vendor: ' + w2.getParameter(ext.UNMASKED_VENDOR_WEBGL) + '\nRenderer: ' + w2.getParameter(ext.UNMASKED_RENDERER_WEBGL) + '</pre>';
+        }
+      }
+
+      output += '<h3>WebGL 1.0: ' + (w1 ? '<span class="ok">AVAILABLE</span>' : '<span class="bad">UNAVAILABLE</span>') + '</h3>';
+      if (w1 && !w2) {
+        const ext = w1.getExtension('WEBGL_debug_renderer_info');
+        if (ext) {
+          output += '<pre>Vendor: ' + w1.getParameter(ext.UNMASKED_VENDOR_WEBGL) + '\nRenderer: ' + w1.getParameter(ext.UNMASKED_RENDERER_WEBGL) + '</pre>';
+        }
+      }
+
+      if (!w2 && !w1) {
+        output += '<p class="bad">WebGL is completely disabled by the browser or GPU driver.</p>';
+      }
+
+      res.innerHTML = output;
+    }
+
+    check();
+  </script>
+</body>
+</html>
